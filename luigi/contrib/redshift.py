@@ -270,6 +270,7 @@ class S3CopyToTable(rdbms.CopyToTable):
         return RedshiftTarget(
             host=self.host,
             database=self.database,
+            port=self.port if self.port else 5439,
             user=self.user,
             password=self.password,
             table=self.table,
