@@ -189,11 +189,12 @@ class RemoteScheduler(Scheduler):
     def graph(self):
         return self._request('/api/graph', {})
 
-    def dep_graph(self, task_id):
-        return self._request('/api/dep_graph', {'task_id': task_id})
+    def dep_graph(self, task_id, include_done=True):
+        return self._request('/api/dep_graph', {'task_id': task_id, 'include_done': include_done})
 
-    def inverse_dep_graph(self, task_id):
-        return self._request('/api/inverse_dep_graph', {'task_id': task_id})
+    def inverse_dep_graph(self, task_id, include_done=True):
+        return self._request('/api/inverse_dep_graph', {
+            'task_id': task_id, 'include_done': include_done})
 
     def task_list(self, status, upstream_status, search=None):
         return self._request('/api/task_list', {
@@ -205,6 +206,9 @@ class RemoteScheduler(Scheduler):
     def worker_list(self):
         return self._request('/api/worker_list', {})
 
+    def resource_list(self):
+        return self._request('/api/resource_list', {})
+
     def task_search(self, task_str):
         return self._request('/api/task_search', {'task_str': task_str})
 
@@ -213,6 +217,9 @@ class RemoteScheduler(Scheduler):
 
     def add_worker(self, worker, info):
         return self._request('/api/add_worker', {'worker': worker, 'info': info})
+
+    def disable_worker(self, worker):
+        return self._request('/api/disable_worker', {'worker': worker})
 
     def update_resources(self, **resources):
         return self._request('/api/update_resources', resources)

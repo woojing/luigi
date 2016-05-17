@@ -45,14 +45,14 @@ var LuigiAPI = (function() {
         }
     }
 
-    LuigiAPI.prototype.getDependencyGraph = function (taskId, callback) {
-        return jsonRPC(this.urlRoot + "/dep_graph", {task_id: taskId}, function(response) {
+    LuigiAPI.prototype.getDependencyGraph = function (taskId, callback, include_done) {
+        return jsonRPC(this.urlRoot + "/dep_graph", {task_id: taskId, include_done: include_done}, function(response) {
             callback(flatten(response.response, taskId));
         });
     };
 
-    LuigiAPI.prototype.getInverseDependencyGraph = function (taskId, callback) {
-        return jsonRPC(this.urlRoot + "/inverse_dep_graph", {task_id: taskId}, function(response) {
+    LuigiAPI.prototype.getInverseDependencyGraph = function (taskId, callback, include_done) {
+        return jsonRPC(this.urlRoot + "/inverse_dep_graph", {task_id: taskId, include_done: include_done}, function(response) {
             callback(flatten(response.response, taskId));
         });
     }
@@ -116,6 +116,16 @@ var LuigiAPI = (function() {
             callback(flatten_running(response.response));
         });
     };
+
+    LuigiAPI.prototype.getResourceList = function(callback) {
+        jsonRPC(this.urlRoot + "/resource_list", {}, function(response) {
+            callback(flatten_running(response.response));
+        });
+    };
+
+    LuigiAPI.prototype.disableWorker = function(workerId) {
+        jsonRPC(this.urlRoot + "/disable_worker", {'worker': workerId});
+    }
 
     return LuigiAPI;
 })();

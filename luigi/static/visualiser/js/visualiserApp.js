@@ -1,6 +1,7 @@
 function visualiserApp(luigi) {
     var templates = {};
     var invertDependencies = false;
+    var hideDone = false;
     var typingTimer = 0;
     var visType;
     var dt; // DataTable instantiated in $(document).ready()
@@ -60,7 +61,7 @@ function visualiserApp(luigi) {
     function taskToDisplayTask(task) {
         var taskName = task.name;
         var taskParams = JSON.stringify(task.params);
-        var displayTime = new Date(Math.floor(task.start_time*1000)).toLocaleString();
+        var displayTime = new Date(Math.floor(task.last_updated*1000)).toLocaleString();
         var time_running = -1;
         if (task.status == "RUNNING" && "time_running" in task) {
             var current_time = new Date().getTime();
@@ -73,10 +74,11 @@ function visualiserApp(luigi) {
             encodedTaskId: encodeURIComponent(task.taskId),
             taskName: taskName,
             taskParams: taskParams,
+            displayName: task.display_name,
             priority: task.priority,
             resources: JSON.stringify(task.resources),
             displayTime: displayTime,
-            displayTimestamp: task.start_time,
+            displayTimestamp: task.last_updated,
             timeRunning: time_running,
             trackingUrl: task.tracking_url,
             status: task.status,
@@ -239,6 +241,40 @@ function visualiserApp(luigi) {
         return renderTemplate("workerTemplate", {"workers": workers.map(processWorker)});
     }
 
+    function processResource(resource) {
+        resource.tasks = resource.running.map(taskToDisplayTask);
+        resource.percent_used = 100 * resource.num_used / resource.num_total;
+        if (resource.percent_used >= 100) {
+            resource.bar_type = 'danger';
+        } else if (resource.percent_used > 50) {
+            resource.bar_type = 'warning';
+        } else {
+            resource.bar_type = 'success';
+        }
+        return resource;
+    }
+
+    function renderResources(resources) {
+        return renderTemplate("resourceTemplate", {
+            "resources": resources.map(processResource).sort(function(r1, r2) {
+                if (r1.percent_used > r2.percent_used)
+                    return -1;
+                else if (r1.percent_used < r2.percent_used)
+                    return 1;
+                else if (r1.num_used > r2.num_used)
+                    return -1;
+                else if (r1.num_used < r2.num_used)
+                    return 1;
+                else if (r1.name < r2.name)
+                    return -1;
+                else if (r1.name > r2.name)
+                    return 1;
+                else
+                    return 0;
+            })
+        });
+    }
+
     function switchTab(tabId) {
         $(".tabButton").parent().removeClass("active");
         $(".tab-pane").removeClass("active");
@@ -290,7 +326,7 @@ function visualiserApp(luigi) {
             $("#searchError").empty();
             $("#searchError").removeClass();
             if(dependencyGraph.length > 0) {
-                $("#dependencyTitle").text(taskId);
+                $("#dependencyTitle").text(dependencyGraph[0].display_name);
                 if(dependencyGraph != '{}'){
                     for (var id in dependencyGraph) {
                         if (dependencyGraph[id].deps.length > 0) {
@@ -319,7 +355,7 @@ function visualiserApp(luigi) {
             $("#searchError").empty();
             $("#searchError").removeClass();
             if(dependencyGraph.length > 0) {
-              $("#dependencyTitle").text(taskId);
+              $("#dependencyTitle").text(dependencyGraph[0].display_name);
               $("#graphPlaceholder").get(0).graph.updateData(dependencyGraph);
               $("#graphContainer").show();
               bindGraphEvents();
@@ -350,6 +386,8 @@ function visualiserApp(luigi) {
         var hash = decodeURIComponent(location.hash);
         if (hash == "#w") {
             switchTab("workerList");
+        } else if (hash == "#r") {
+            switchTab("resourceList");
         } else if (hash) {
             var taskId = decodeURIComponent(hash.substr(1));
             $("#searchError").empty();
@@ -358,9 +396,9 @@ function visualiserApp(luigi) {
                 var depGraphCallback = makeGraphCallback(visType, taskId, paint);
 
                 if (invertDependencies) {
-                    luigi.getInverseDependencyGraph(taskId, depGraphCallback);
+                    luigi.getInverseDependencyGraph(taskId, depGraphCallback, !hideDone);
                 } else {
-                    luigi.getDependencyGraph(taskId, depGraphCallback);
+                    luigi.getDependencyGraph(taskId, depGraphCallback, !hideDone);
                 }
             }
             switchTab("dependencyGraph");
@@ -405,6 +443,11 @@ function visualiserApp(luigi) {
         invertDependencies = $('#invertCheckbox')[0].checked;
         $("#invertCheckbox").click(function() {
             invertDependencies = this.checked;
+            processHashChange(true);
+        });
+        hideDone = $('#hideDoneCheckbox')[0].checked;
+        $('#hideDoneCheckbox').click(function() {
+            hideDone = this.checked;
             processHashChange(true);
         });
         $("a[href=#list]").click(function() { location.hash=""; });
@@ -507,7 +550,7 @@ function visualiserApp(luigi) {
             for (var id in tasks) {
                 var task = tasks[id];
                 var className = task.status;
-                    
+
                 var html = "<div class='taskNode' data-task-id='" + task.taskId + "'>";
                 html += "<span class=status></span>";
                 html += "<span class=name>"+task.name+"</span>";
@@ -774,6 +817,10 @@ function visualiserApp(luigi) {
             $("#workerList").append(renderWorkers(workers));
         });
 
+        luigi.getResourceList(function(resources) {
+            $("#resourceList").append(renderResources(resources));
+        });
+
         dt = $('#taskTable').DataTable({
             dom: 'l<"#serverSide">frtip',
             language: {
@@ -869,6 +916,22 @@ function visualiserApp(luigi) {
         $('.navbar-nav').on('click', 'a', function () {
             var tabName = $(this).data('tab');
             updateSidebar(tabName);
+        });
+
+        $('#workerList').on('show.bs.modal', '#disableWorkerModal', function (event) {
+            var triggerButton = $(event.relatedTarget);
+            $('#disableWorkerButton').data('trigger', triggerButton);
+        });
+
+        $('#workerList').on('click', '#disableWorkerButton', function() {
+            var triggerButton = $(this).data('trigger');
+            var worker = triggerButton.data('worker');
+
+            luigi.disableWorker(worker);
+
+            // show the worker as disabled in the visualiser
+            triggerButton.parents('.box').addClass('box-solid box-default');
+            triggerButton.remove();
         });
 
         visType = getVisType();

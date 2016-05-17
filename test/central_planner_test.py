@@ -21,7 +21,7 @@ from helpers import unittest
 from nose.plugins.attrib import attr
 
 import luigi.notifications
-from luigi.scheduler import DISABLED, DONE, FAILED, CentralPlannerScheduler
+from luigi.scheduler import DISABLED, DONE, FAILED, PENDING, CentralPlannerScheduler
 
 luigi.notifications.DEBUG = True
 WORKER = 'myworker'
@@ -207,6 +207,50 @@ class CentralPlannerTest(unittest.TestCase):
         self.sch.add_task(task_id='C', worker='Y', status=DONE)
 
         self.assertEqual(self.sch.get_work(worker='Y')['task_id'], 'B')
+
+    def test_start_time(self):
+        self.setTime(100)
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.setTime(200)
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.sch.add_task(worker=WORKER, task_id='A', status=DONE)
+        self.assertEqual(100, self.sch.task_list(DONE, '')['A']['start_time'])
+
+    def test_last_updated_does_not_change_with_same_status_update(self):
+        for t, status in ((100, PENDING), (300, DONE), (500, DISABLED)):
+            self.setTime(t)
+            self.sch.add_task(worker=WORKER, task_id='A', status=status)
+            self.assertEqual(t, self.sch.task_list(status, '')['A']['last_updated'])
+
+            self.setTime(t + 100)
+            self.sch.add_task(worker=WORKER, task_id='A', status=status)
+            self.assertEqual(t, self.sch.task_list(status, '')['A']['last_updated'])
+
+    def test_last_updated_shows_running_start(self):
+        self.setTime(100)
+        self.sch.add_task(worker=WORKER, task_id='A', status=PENDING)
+        self.assertEqual(100, self.sch.task_list(PENDING, '')['A']['last_updated'])
+
+        self.setTime(200)
+        self.assertEqual('A', self.sch.get_work(worker=WORKER)['task_id'])
+        self.assertEqual(200, self.sch.task_list('RUNNING', '')['A']['last_updated'])
+
+        self.setTime(300)
+        self.sch.add_task(worker=WORKER, task_id='A', status=PENDING)
+        self.assertEqual(200, self.sch.task_list('RUNNING', '')['A']['last_updated'])
+
+    def test_last_updated_with_failure_and_recovery(self):
+        self.setTime(100)
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.assertEqual('A', self.sch.get_work(worker=WORKER)['task_id'])
+
+        self.setTime(200)
+        self.sch.add_task(worker=WORKER, task_id='A', status=FAILED)
+        self.assertEqual(200, self.sch.task_list(FAILED, '')['A']['last_updated'])
+
+        self.setTime(1000)
+        self.sch.prune()
+        self.assertEqual(1000, self.sch.task_list(PENDING, '')['A']['last_updated'])
 
     def test_timeout(self):
         # A bug that was earlier present when restarting the same flow
@@ -750,6 +794,79 @@ class CentralPlannerTest(unittest.TestCase):
         self.sch.add_task(worker=WORKER, task_id='A')
         self.assertEqual(self.sch.get_work(worker=WORKER)['task_id'], 'A')
 
+    def test_disable_worker(self):
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.sch.disable_worker(worker=WORKER)
+        work = self.sch.get_work(worker=WORKER)
+        self.assertEqual(0, work['n_unique_pending'])
+        self.assertEqual(0, work['n_pending_tasks'])
+        self.assertIsNone(work['task_id'])
+
+    def test_disable_worker_leaves_jobs_running(self):
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.sch.get_work(worker=WORKER)
+
+        self.sch.disable_worker(worker=WORKER)
+        self.assertEqual(['A'], list(self.sch.task_list('RUNNING', '').keys()))
+        self.assertEqual(['A'], list(self.sch.worker_list()[0]['running'].keys()))
+
+    def test_disable_worker_cannot_pick_up_failed_jobs(self):
+        self.setTime(0)
+
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.sch.get_work(worker=WORKER)
+        self.sch.disable_worker(worker=WORKER)
+        self.sch.add_task(worker=WORKER, task_id='A', status=FAILED)
+
+        # increase time and prune to make the job pending again
+        self.setTime(1000)
+        self.sch.ping(worker=WORKER)
+        self.sch.prune()
+
+        # we won't try the job again
+        self.assertIsNone(self.sch.get_work(worker=WORKER)['task_id'])
+
+        # not even if other stuff is pending, changing the pending tasks code path
+        self.sch.add_task(worker='other_worker', task_id='B')
+        self.assertIsNone(self.sch.get_work(worker=WORKER)['task_id'])
+
+    def test_disable_worker_cannot_continue_scheduling(self):
+        self.sch.disable_worker(worker=WORKER)
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.assertIsNone(self.sch.get_work(worker=WORKER)['task_id'])
+
+    def test_disable_worker_can_finish_task(self, new_status=DONE, new_deps=[]):
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.assertEqual('A', self.sch.get_work(worker=WORKER)['task_id'])
+
+        self.sch.disable_worker(worker=WORKER)
+        self.assertEqual(['A'], list(self.sch.task_list('RUNNING', '').keys()))
+
+        for dep in new_deps:
+            self.sch.add_task(worker=WORKER, task_id=dep, status='PENDING')
+        self.sch.add_task(worker=WORKER, task_id='A', status=new_status, new_deps=new_deps)
+        self.assertFalse(self.sch.task_list('RUNNING', '').keys())
+        self.assertEqual(['A'], list(self.sch.task_list(new_status, '').keys()))
+
+        self.assertIsNone(self.sch.get_work(worker=WORKER)['task_id'])
+        for task in self.sch.task_list('', '').values():
+            self.assertFalse(task['workers'])
+
+    def test_disable_worker_can_fail_task(self):
+        self.test_disable_worker_can_finish_task(new_status=FAILED)
+
+    def test_disable_worker_stays_disabled_on_new_deps(self):
+        self.test_disable_worker_can_finish_task(new_status='PENDING', new_deps=['B', 'C'])
+
+    def test_prune_worker(self):
+        self.setTime(1)
+        self.sch.add_worker(worker=WORKER, info={})
+        self.setTime(10000)
+        self.sch.prune()
+        self.setTime(20000)
+        self.sch.prune()
+        self.assertFalse(self.sch.worker_list())
+
     def test_task_list_beyond_limit(self):
         sch = CentralPlannerScheduler(max_shown_tasks=3)
         for c in 'ABCD':
@@ -772,29 +889,73 @@ class CentralPlannerTest(unittest.TestCase):
         self.assertEqual(set('EFG'), set(sch.task_list('PENDING', '').keys()))
         self.assertEqual({'num_tasks': 4}, sch.task_list('DONE', ''))
 
-    def test_task_list_filter_by_search(self):
-        self.sch.add_task(worker=WORKER, task_id='test_match_task')
-        self.sch.add_task(worker=WORKER, task_id='test_filter_task')
-        matches = self.sch.task_list('PENDING', '', search='match')
-        self.assertEqual(['test_match_task'], list(matches.keys()))
+    def add_task(self, family, **params):
+        task_id = str(hash((family, str(params))))  # use an unhelpful task id
+        self.sch.add_task(worker=WORKER, family=family, params=params, task_id=task_id)
+        return task_id
+
+    def search_pending(self, term, expected_keys):
+        actual_keys = set(self.sch.task_list('PENDING', '', search=term).keys())
+        self.assertEqual(expected_keys, actual_keys)
+
+    def test_task_list_filter_by_search_family_name(self):
+        task1 = self.add_task('MySpecialTask')
+        task2 = self.add_task('OtherSpecialTask')
+
+        self.search_pending('Special', {task1, task2})
+        self.search_pending('Task', {task1, task2})
+        self.search_pending('My', {task1})
+        self.search_pending('Other', {task2})
+
+    def test_task_list_filter_by_search_long_family_name(self):
+        task = self.add_task('TaskClassWithAVeryLongNameAndDistinctEndingUUDDLRLRAB')
+        self.search_pending('UUDDLRLRAB', {task})
+
+    def test_task_list_filter_by_param_name(self):
+        task1 = self.add_task('ClassA', day='2016-02-01')
+        task2 = self.add_task('ClassB', hour='2016-02-01T12')
+
+        self.search_pending('day', {task1})
+        self.search_pending('hour', {task2})
+
+    def test_task_list_filter_by_long_param_name(self):
+        task = self.add_task('ClassA', a_very_long_param_name_ending_with_uuddlrlrab='2016-02-01')
+
+        self.search_pending('uuddlrlrab', {task})
+
+    def test_task_list_filter_by_param_value(self):
+        task1 = self.add_task('ClassA', day='2016-02-01')
+        task2 = self.add_task('ClassB', hour='2016-02-01T12')
+
+        self.search_pending('2016-02-01', {task1, task2})
+        self.search_pending('T12', {task2})
+
+    def test_task_list_filter_by_long_param_value(self):
+        task = self.add_task('ClassA', param='a_very_long_param_value_ending_with_uuddlrlrab')
+        self.search_pending('uuddlrlrab', {task})
+
+    def test_task_list_filter_by_param_name_value_pair(self):
+        task = self.add_task('ClassA', param='value')
+        self.search_pending('param=value', {task})
+
+    def test_task_list_does_not_filter_by_task_id(self):
+        task = self.add_task('Class')
+        self.search_pending(task, set())
 
     def test_task_list_filter_by_multiple_search_terms(self):
-        self.sch.add_task(worker=WORKER, task_id='abcd')
-        self.sch.add_task(worker=WORKER, task_id='abd')
-        self.sch.add_task(worker=WORKER, task_id='acd')
-        self.sch.add_task(worker=WORKER, task_id='ad')
-        self.sch.add_task(worker=WORKER, task_id='bc')
-        matches = self.sch.task_list('PENDING', '', search='b c')
-        self.assertEqual(set(['abcd', 'bc']), set(matches.keys()))
+        expected = self.add_task('ClassA', day='2016-02-01', num='5')
+        self.add_task('ClassA', day='2016-03-01', num='5')
+        self.add_task('ClassB', day='2016-02-01', num='5')
+        self.add_task('ClassA', day='2016-02-01', val='5')
+
+        self.search_pending('ClassA 2016-02-01 num', {expected})
 
     def test_search_results_beyond_limit(self):
         sch = CentralPlannerScheduler(max_shown_tasks=3)
-        sch.add_task(worker=WORKER, task_id='task_a')
-        sch.add_task(worker=WORKER, task_id='task_b')
-        sch.add_task(worker=WORKER, task_id='task_c')
-        sch.add_task(worker=WORKER, task_id='task_d')
-        self.assertEqual({'num_tasks': 4}, sch.task_list('PENDING', '', search='a'))
-        self.assertEqual(['task_a'], list(sch.task_list('PENDING', '', search='_a').keys()))
+        for i in range(4):
+            sch.add_task(worker=WORKER, family='Test', params={'p': str(i)}, task_id='Test_%i' % i)
+        self.assertEqual({'num_tasks': 4}, sch.task_list('PENDING', '', search='Test'))
+        self.assertEqual(['Test_0'], list(sch.task_list('PENDING', '', search='0').keys()))
 
     def test_priority_update_dependency_chain(self):
         self.sch.add_task(worker=WORKER, task_id='A', priority=10, deps=['B'])

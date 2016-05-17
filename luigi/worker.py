@@ -106,7 +106,7 @@ class TaskProcess(multiprocessing.Process):
         try:
             task_gen = self.task.run(tracking_url_callback=self.tracking_url_callback)
         except TypeError as ex:
-            if 'unexpected keyword argument' not in getattr(ex, 'message', ex.args[0]):
+            if 'unexpected keyword argument' not in str(ex):
                 raise
             run_again = True
         if run_again:
@@ -285,6 +285,7 @@ def check_complete(task, out_queue):
 
 
 class worker(Config):
+    # NOTE: `section.config-variable` in the config_path argument is deprecated in favor of `worker.config_variable`
 
     ping_interval = FloatParameter(default=1.0,
                                    config_path=dict(section='core', name='worker-ping-interval'))
@@ -309,6 +310,9 @@ class worker(Config):
                                          config_path=dict(section='core', name='retry-external-tasks'),
                                          description='If true, incomplete external tasks will be '
                                          'retested for completion while Luigi is running.')
+    no_install_shutdown_handler = BoolParameter(default=False,
+                                                description='If true, the SIGUSR1 shutdown handler will'
+                                                'NOT be install on the worker')
 
 
 class KeepAliveThread(threading.Thread):
@@ -379,10 +383,13 @@ class Worker(object):
         self.run_succeeded = True
         self.unfulfilled_counts = collections.defaultdict(int)
 
-        try:
-            signal.signal(signal.SIGUSR1, self.handle_interrupt)
-        except AttributeError:
-            pass
+        # note that ``signal.signal(signal.SIGUSR1, fn)`` only works inside the main execution thread, which is why we
+        # provide the ability to conditionally install the hook.
+        if not self._config.no_install_shutdown_handler:
+            try:
+                signal.signal(signal.SIGUSR1, self.handle_interrupt)
+            except AttributeError:
+                pass
 
         # Keep info about what tasks are running (could be in other processes)
         if worker_processes == 1:
@@ -766,8 +773,9 @@ class Worker(object):
                 # Not a running task. Probably already removed.
                 # Maybe it yielded something?
 
-            if status == FAILED and expl:
-                # If no expl, it is because of a retry-external-task failure.
+            # external task if run not implemented, retry-able if config option is enabled.
+            external_task_retryable = task.run == NotImplemented and self._config.retry_external_tasks
+            if status == FAILED and not external_task_retryable:
                 self._email_task_failure(task, expl)
 
             new_deps = []

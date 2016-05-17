@@ -29,6 +29,7 @@ import datetime
 import ftplib
 import os
 import random
+import tempfile
 import io
 
 import luigi
@@ -40,12 +41,13 @@ from luigi.format import FileWrapper
 
 class RemoteFileSystem(luigi.target.FileSystem):
 
-    def __init__(self, host, username=None, password=None, port=21, tls=False):
+    def __init__(self, host, username=None, password=None, port=21, tls=False, timeout=60):
         self.host = host
         self.username = username
         self.password = password
         self.port = port
         self.tls = tls
+        self.timeout = timeout
 
     def _connect(self):
         """
@@ -55,7 +57,7 @@ class RemoteFileSystem(luigi.target.FileSystem):
             self.ftpcon = ftplib.FTP_TLS()
         else:
             self.ftpcon = ftplib.FTP()
-        self.ftpcon.connect(self.host, self.port)
+        self.ftpcon.connect(self.host, self.port, timeout=self.timeout)
         self.ftpcon.login(self.username, self.password)
         if self.tls:
             self.ftpcon.prot_p()
@@ -112,13 +114,15 @@ class RemoteFileSystem(luigi.target.FileSystem):
                 continue
 
             try:
-                ftp.cwd(name)  # if we can cwd to it, it's a folder
-                ftp.cwd(wd)  # don't try a nuke a folder we're in
+                ftp.cwd(name)   # if we can cwd to it, it's a folder
+                ftp.cwd(wd)   # don't try a nuke a folder we're in
+                ftp.cwd(path)  # then go back to where we were
                 self._rm_recursive(ftp, name)
-            except ftplib.all_errors:
+            except ftplib.all_errors as e:
                 ftp.delete(name)
 
         try:
+            ftp.cwd(wd)  # do not delete the folder that we are in
             ftp.rmd(path)
         except ftplib.all_errors as e:
             print('_rm_recursive: Could not remove {0}: {1}'.format(path, e))
@@ -227,7 +231,7 @@ class RemoteTarget(luigi.target.FileSystemTarget):
 
     def __init__(
         self, path, host, format=None, username=None,
-        password=None, port=21, mtime=None, tls=False
+        password=None, port=21, mtime=None, tls=False, timeout=60
     ):
         if format is None:
             format = luigi.format.get_default_format()
@@ -236,7 +240,8 @@ class RemoteTarget(luigi.target.FileSystemTarget):
         self.mtime = mtime
         self.format = format
         self.tls = tls
-        self._fs = RemoteFileSystem(host, username, password, port, tls)
+        self.timeout = timeout
+        self._fs = RemoteFileSystem(host, username, password, port, tls, timeout)
 
     @property
     def fs(self):
@@ -258,7 +263,8 @@ class RemoteTarget(luigi.target.FileSystemTarget):
             return self.format.pipe_writer(AtomicFtpFile(self._fs, self.path))
 
         elif mode == 'r':
-            self.__tmp_path = self.path + '-luigi-tmp-%09d' % random.randrange(0, 1e10)
+            temp_dir = os.path.join(tempfile.gettempdir(), 'luigi-contrib-ftp')
+            self.__tmp_path = temp_dir + '/' + self.path.lstrip('/') + '-luigi-tmp-%09d' % random.randrange(0, 1e10)
             # download file to local
             self._fs.get(self.path, self.__tmp_path)
 
