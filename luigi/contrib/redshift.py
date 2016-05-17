@@ -539,6 +539,7 @@ class RedshiftQuery(postgres.PostgresQuery):
         """
         return RedshiftTarget(
             host=self.host,
+            port=self.port if self.port else 5439,
             database=self.database,
             user=self.user,
             password=self.password,
