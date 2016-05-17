@@ -21,7 +21,8 @@ from helpers import unittest
 from nose.plugins.attrib import attr
 
 import luigi.notifications
-from luigi.scheduler import DISABLED, DONE, FAILED, PENDING, CentralPlannerScheduler
+from luigi.scheduler import DISABLED, DONE, FAILED, PENDING, \
+    UNKNOWN, CentralPlannerScheduler
 
 luigi.notifications.DEBUG = True
 WORKER = 'myworker'
@@ -547,7 +548,7 @@ class CentralPlannerTest(unittest.TestCase):
         # now we have enough resources
         self.check_task_order(['B', 'A'])
 
-    def test_hendle_multiple_resources(self):
+    def test_handle_multiple_resources(self):
         self.sch.add_task(worker=WORKER, task_id='A', resources={'r1': 1, 'r2': 1})
         self.sch.add_task(worker=WORKER, task_id='B', resources={'r1': 1, 'r2': 1})
         self.sch.add_task(worker=WORKER, task_id='C', resources={'r1': 1})
@@ -1086,5 +1087,64 @@ class CentralPlannerTest(unittest.TestCase):
             self.assertTrue(0 <= res < NUM_PENDING)
             self.sch.add_task(worker=WORKER, task_id=str(res), status=DONE)
 
-if __name__ == '__main__':
-    unittest.main()
+    def test_assistants_dont_nurture_finished_statuses(self):
+        """
+        Assistants should not affect longevity of DONE tasks
+
+        Also check for statuses DISABLED and UNKNOWN.
+        """
+        self.sch = CentralPlannerScheduler(retry_delay=100000000000)  # Never pendify failed tasks
+        self.setTime(1)
+        self.sch.add_worker('assistant', [('assistant', True)])
+        self.sch.ping(worker='assistant')
+        self.sch.add_task(worker='uploader', task_id='running', status=PENDING)
+        self.assertEqual(self.sch.get_work(worker='assistant', assistant=True)['task_id'], 'running')
+
+        self.setTime(2)
+        self.sch.add_task(worker='uploader', task_id='done', status=DONE)
+        self.sch.add_task(worker='uploader', task_id='disabled', status=DISABLED)
+        self.sch.add_task(worker='uploader', task_id='pending', status=PENDING)
+        self.sch.add_task(worker='uploader', task_id='failed', status=FAILED)
+        self.sch.add_task(worker='uploader', task_id='unknown', status=UNKNOWN)
+
+        self.setTime(100000)
+        self.sch.ping(worker='assistant')
+        self.sch.prune()
+
+        self.setTime(200000)
+        self.sch.ping(worker='assistant')
+        self.sch.prune()
+        nurtured_statuses = ['PENDING', 'FAILED', 'RUNNING']
+        not_nurtured_statuses = ['DONE', 'UNKNOWN', 'DISABLED']
+
+        for status in nurtured_statuses:
+            print(status)
+            self.assertEqual(set([status.lower()]), set(self.sch.task_list(status, '')))
+
+        for status in not_nurtured_statuses:
+            print(status)
+            self.assertEqual(set([]), set(self.sch.task_list(status, '')))
+
+        self.assertEqual(3, len(self.sch.task_list(None, '')))  # None == All statuses
+
+    def test_no_crash_on_only_disable_hard_timeout(self):
+        """
+        Scheduler shouldn't crash with only disable_hard_timeout
+
+        There was some failure happening when disable_hard_timeout was set but
+        disable_failures was not.
+        """
+        self.sch = CentralPlannerScheduler(retry_delay=5,
+                                           disable_hard_timeout=100)
+        self.setTime(1)
+        self.sch.add_worker(WORKER, [])
+        self.sch.ping(worker=WORKER)
+
+        self.setTime(2)
+        self.sch.add_task(worker=WORKER, task_id='A')
+        self.sch.add_task(worker=WORKER, task_id='B', deps=['A'])
+        self.assertEqual(self.sch.get_work(worker=WORKER)['task_id'], 'A')
+        self.sch.add_task(worker=WORKER, task_id='A', status=FAILED)
+        self.setTime(10)
+        self.sch.prune()
+        self.assertEqual(self.sch.get_work(worker=WORKER)['task_id'], 'A')

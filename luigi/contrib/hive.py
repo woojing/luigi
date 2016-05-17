@@ -21,6 +21,7 @@ import operator
 import os
 import subprocess
 import tempfile
+import warnings
 
 from luigi import six
 
@@ -45,7 +46,7 @@ class HiveCommandError(RuntimeError):
 
 
 def load_hive_cmd():
-    return luigi.configuration.get_config().get('hive', 'command', 'hive')
+    return luigi.configuration.get_config().get('hive', 'command', 'hive').split(' ')
 
 
 def get_hive_syntax():
@@ -61,7 +62,7 @@ def run_hive(args, check_return_code=True):
     (which are done using DESCRIBE do not exit with a return code of 0
     so we need an option to ignore the return code and just return stdout for parsing
     """
-    cmd = [load_hive_cmd()] + args
+    cmd = load_hive_cmd() + args
     p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     stdout, stderr = p.communicate()
     if check_return_code and p.returncode != 0:
@@ -297,7 +298,7 @@ class HiveQueryTask(luigi.contrib.hadoop.BaseHadoopJobTask):
         * hive.exec.reducers.max (reducers_max)
         """
         jcs = {}
-        jcs['mapred.job.name'] = self.task_id
+        jcs['mapred.job.name'] = "'" + self.task_id + "'"
         if self.n_reduce_tasks is not None:
             jcs['mapred.reduce.tasks'] = self.n_reduce_tasks
         if self.pool is not None:
@@ -342,6 +343,10 @@ class HiveQueryRunner(luigi.contrib.hadoop.JobRunner):
                         pass
 
     def run_job(self, job, tracking_url_callback=None):
+        if tracking_url_callback is not None:
+            warnings.warn("tracking_url_callback argument is deprecated, task.set_tracking_url is "
+                          "used instead.", DeprecationWarning)
+
         self.prepare_outputs(job)
         with tempfile.NamedTemporaryFile() as f:
             query = job.query()
@@ -349,7 +354,7 @@ class HiveQueryRunner(luigi.contrib.hadoop.JobRunner):
                 query = query.encode('utf8')
             f.write(query)
             f.flush()
-            arglist = [load_hive_cmd(), '-f', f.name]
+            arglist = load_hive_cmd() + ['-f', f.name]
             hiverc = job.hiverc()
             if hiverc:
                 if isinstance(hiverc, str):
@@ -361,7 +366,7 @@ class HiveQueryRunner(luigi.contrib.hadoop.JobRunner):
                     arglist += ['--hiveconf', '{0}={1}'.format(k, v)]
 
             logger.info(arglist)
-            return luigi.contrib.hadoop.run_and_track_hadoop_job(arglist, tracking_url_callback)
+            return luigi.contrib.hadoop.run_and_track_hadoop_job(arglist, job.set_tracking_url)
 
 
 class HiveTableTarget(luigi.Target):
@@ -378,7 +383,7 @@ class HiveTableTarget(luigi.Target):
         self.client = client
 
     def exists(self):
-        logger.debug("Checking Hive table '%s.%s' exists", self.database, self.table)
+        logger.debug("Checking if Hive table '%s.%s' exists", self.database, self.table)
         return self.client.table_exists(self.table, self.database)
 
     @property

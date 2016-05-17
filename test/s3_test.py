@@ -26,6 +26,8 @@ from helpers import with_config, unittest
 from boto.exception import S3ResponseError
 from boto.s3 import key
 from moto import mock_s3
+from moto import mock_sts
+
 from luigi import configuration
 from luigi.s3 import FileNotFoundException, InvalidDeleteException, S3Client, S3Target
 from luigi.target import MissingParentDirectory
@@ -127,7 +129,10 @@ class TestS3Client(unittest.TestCase):
 
         self.mock_s3 = mock_s3()
         self.mock_s3.start()
+        self.mock_sts = mock_sts()
+        self.mock_sts.start()
         self.addCleanup(self.mock_s3.stop)
+        self.addCleanup(self.mock_sts.stop)
 
     def test_init_with_environment_variables(self):
         os.environ['AWS_ACCESS_KEY_ID'] = 'foo'
@@ -147,6 +152,12 @@ class TestS3Client(unittest.TestCase):
         s3_client = S3Client()
         self.assertEqual(s3_client.s3.access_key, 'foo')
         self.assertEqual(s3_client.s3.secret_key, 'bar')
+
+    @with_config({'s3': {'aws_role_arn': 'role', 'aws_role_session_name': 'name'}})
+    def test_init_with_config_and_roles(self):
+        s3_client = S3Client()
+        self.assertEqual(s3_client.s3.access_key, 'AKIAIOSFODNN7EXAMPLE')
+        self.assertEqual(s3_client.s3.secret_key, 'aJalrXUtnFEMI/K7MDENG/bPxRfiCYzEXAMPLEKEY')
 
     def test_put(self):
         s3_client = S3Client(AWS_ACCESS_KEY, AWS_SECRET_KEY)
@@ -430,6 +441,41 @@ class TestS3Client(unittest.TestCase):
         """
         self._run_multipart_copy_test(self.test_put_multipart_empty_file)
 
+    def test_copy_dir(self):
+        """
+        Test copying 20 files from one folder to another
+        """
+
+        n = 20
+        copy_part_size = (1024 ** 2) * 5
+
+        # Note we can't test the multipart copy due to moto issue #526
+        # so here I have to keep the file size smaller than the copy_part_size
+        file_size = 5000
+
+        s3_dir = 's3://mybucket/copydir/'
+        file_contents = b"a" * file_size
+        tmp_file = tempfile.NamedTemporaryFile(mode='wb', delete=True)
+        tmp_file_path = tmp_file.name
+        tmp_file.write(file_contents)
+        tmp_file.flush()
+
+        s3_client = S3Client(AWS_ACCESS_KEY, AWS_SECRET_KEY)
+        s3_client.s3.create_bucket('mybucket')
+
+        for i in range(n):
+            file_path = s3_dir + str(i)
+            s3_client.put_multipart(tmp_file_path, file_path)
+            self.assertTrue(s3_client.exists(file_path))
+
+        s3_dest = 's3://mybucket/copydir_new/'
+        s3_client.copy(s3_dir, s3_dest, threads=10, part_size=copy_part_size)
+
+        for i in range(n):
+            original_size = s3_client.get_key(s3_dir + str(i)).size
+            copy_size = s3_client.get_key(s3_dest + str(i)).size
+            self.assertEqual(original_size, copy_size)
+
     def _run_multipart_copy_test(self, put_method):
         # Run the method to put the file into s3 into the first place
         put_method()
@@ -445,7 +491,7 @@ class TestS3Client(unittest.TestCase):
 
         # Copy the file from old location to new
         s3_client = S3Client(AWS_ACCESS_KEY, AWS_SECRET_KEY)
-        s3_client.copy_multipart(original, copy, part_size=part_size)
+        s3_client.copy(original, copy, part_size=part_size, threads=4)
 
         # We can't use etags to compare between multipart and normal keys,
         # so we fall back to using the size instead
@@ -464,11 +510,13 @@ class TestS3Client(unittest.TestCase):
 
         # Copy the file from old location to new
         s3_client = S3Client(AWS_ACCESS_KEY, AWS_SECRET_KEY)
-        s3_client.copy(original, copy)
+        s3_client.copy(original, copy, threads=4)
 
-        original_md5 = s3_client.get_key(original).etag
-        copy_md5 = s3_client.get_key(copy).etag
-        self.assertEqual(original_md5, copy_md5)
+        # We can't use etags to compare between multipart and normal keys,
+        # so we fall back to using the file size
+        original_size = s3_client.get_key(original).size
+        copy_size = s3_client.get_key(copy).size
+        self.assertEqual(original_size, copy_size)
 
     def _run_multipart_test(self, part_size, file_size, **kwargs):
         file_contents = b"a" * file_size
